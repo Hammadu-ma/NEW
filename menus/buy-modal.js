@@ -45,9 +45,9 @@
 
      <script type="module" src="menus/buy-modal.js"></script>
 
-   Fill in the CONFIG block below (account number/name), and confirm
-   getCurrentStudent() matches how the rest of the app identifies the
-   logged-in student.
+   Fill in the CONFIG block below (account number/name). Student identity is
+   read directly from auth.js's getStoredStudent() — the same source the
+   rest of the app uses — so no manual wiring is needed there.
    ============================================================================ */
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
@@ -55,6 +55,7 @@ import {
   getFirestore, collection, query, where, orderBy, limit, getDocs, getDoc, doc,
   collectionGroup, addDoc, serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
+import { getStoredStudent } from './auth.js';
 
 // Same Firebase project as the rest of the app / the admin panel.
 const firebaseConfig = {
@@ -159,30 +160,36 @@ async function sendReceiptToTelegram({ offer, senderName, file, student, bankAcc
 }
 
 // ------------------------------------------------------------------------
-// Student identity — adjust this if your app stores it differently.
+// Student identity — reads the SAME student record the rest of the app
+// logs in with (auth.js's getStoredStudent(), backed by the real
+// 'atlas_student_v1' localStorage key). This used to guess at generic key
+// names ('studentId', 'secretKey', etc.) that the app never actually
+// wrote, so every submission below silently went through with
+// studentId: null — impossible for the admin to match a payment back to a
+// real student. This is the real, authoritative identity now.
 // ------------------------------------------------------------------------
 function getCurrentStudent() {
   try {
+    const stored = getStoredStudent();
+    if (stored && (stored.id || stored.docId)) {
+      return {
+        id: stored.id || stored.docId,
+        name: stored.name || null,
+        guest: !!stored.guest,
+      };
+    }
+    // Fallback only for other integrations that explicitly set this
+    // (e.g. an embedded/preview context outside the normal login flow).
     if (window.currentStudent && (window.currentStudent.id || window.currentStudent.name)) {
       return {
         id: window.currentStudent.id || null,
         name: window.currentStudent.name || window.currentStudent.displayName || null,
+        guest: false,
       };
     }
-    if (window.__studentId) return { id: window.__studentId, name: window.__studentName || null };
-
-    const lsKeys = ['studentId', 'alifmed_student_id', 'secretKey', 'alifmed_secret_key', 'studentName'];
-    const found = {};
-    lsKeys.forEach((k) => {
-      const v = localStorage.getItem(k);
-      if (v) found[k] = v;
-    });
-    return {
-      id: found.studentId || found.alifmed_student_id || found.secretKey || found.alifmed_secret_key || null,
-      name: found.studentName || null,
-    };
+    return { id: null, name: null, guest: false };
   } catch (e) {
-    return { id: null, name: null };
+    return { id: null, name: null, guest: false };
   }
 }
 
@@ -843,12 +850,16 @@ overlay.querySelector('#bmSubmitBtn').addEventListener('click', async () => {
   if (!selectedBankAccountId) return showError('Please select which account you sent the payment to.');
   if (!selectedFile) return showError('Please upload your payment receipt.');
 
+  const student = getCurrentStudent();
+  if (!student.id || student.guest) {
+    return showError('Please sign up or log in with your secret key first — a guest account can\'t be matched to a payment.');
+  }
+
   const submitBtn = overlay.querySelector('#bmSubmitBtn');
   submitBtn.disabled = true;
   submitBtn.innerHTML = '<span class="bm-spinner"></span><span>Submitting…</span>';
 
   try {
-    const student = getCurrentStudent();
     const accounts = await getBankAccounts();
     const bankAccount = accounts.find((a) => a.id === selectedBankAccountId);
 
